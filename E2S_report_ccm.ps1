@@ -10,23 +10,11 @@ $INI_OUTPUT_RAW_IMPORTED_TABLES = '{0}\report_imported_raw_tables_{1}.csv'
 $INI_OUTPUT_REPORT_CONFIG = '{0}\report_import_configuration.csv' 
 $INI_OUTPUT_REPORT_USERS = '{0}\report_users_configuration.csv' 
 $INI_OUTPUT_ERROR_MESSAGES = '{0}\report_error_message.csv'  
+$INI_OUTPUT_WHAREHOUSE_RAW = '{0}\dump_e2s_{1}.csv'  
 $INI_OUTPUT_FLAG ='{0}\refresh_on_going' -f $INI_OUTPUT_PATH
+
 $INI_SQL_QUERIES = [System.IO.Path]::GetDirectoryName($MyInvocation.MyCommand.Path)
 
-<#
-function retrieve-fiscalyear([System.Data.SqlClient.SqlConnection]$SqlConnection){
-
-	$SqlCmd = New-Object System.Data.SqlClient.SqlCommand
-	$SqlCmd.Connection = $SqlConnection
-	$sql='SELECT TOP 1 [FNY_CODE]  FROM [e2sGeneral].[dbo].[FINANCIALYEAR] where FNY_SELECTED=1 order by [FNY_CODE] DESC'
-	$data = execute-sqlselectquery2 $SqlCmd $sql   @{} 
-	
-	$val = $data[0].FNY_CODE 
-	if ( -not [string]::IsNullOrEmpty($val) ){
-		$INI_FISCAL_YEAR=$val 
-	}
-}
-#>
 
 function read-file-query ([string] $filename) {
     return Get-Content (join-path  $INI_SQL_QUERIES  $filename )
@@ -62,6 +50,44 @@ function establish-connexion(){
     }
     return $SqlConnection 
 }
+
+
+#https://stackoverflow.com/questions/30375519/executereader-in-powershell-script
+function execute-sqlselectquery1 ([System.Data.SqlClient.SqlConnection]$SqlConnection,[string] $SqlStatement, [hashtable]$sqlparameters, [string] $path )
+{
+    $ErrorActionPreference = "Stop"
+    
+    $sqlCmd = New-Object System.Data.SqlClient.SqlCommand
+    $sqlCmd.Connection = $sqlConnection
+    $sqlCmd.CommandText = $SqlStatement
+    
+    foreach ($h in $sqlparameters.GetEnumerator()) {
+        $SqlCmd.parameters.AddWithValue( "@"+$h.Name, $h.value) | out-null 
+    }
+
+    $sqlAdapter = New-Object System.Data.SqlClient.SqlDataAdapter
+    $sqlAdapter.SelectCommand = $sqlCmd
+    $data = New-Object System.Data.DataSet
+    try
+    {
+        $sqlAdapter.Fill($data) 
+        $data.Tables[0] | ConvertTo-Csv  -NoTypeInformation | Out-File -FilePath "$path" -Encoding default
+        
+    }
+    catch
+    {
+        $Error = $_.Exception.Message
+        Write-Error $Error
+        Write-Error -Verbose "Error executing SQL on database [$Database] on server [$SqlServer]. Statement: `r`n$SqlStatement"
+
+    }
+    finally {
+       # $sqlAdapter.Dispose()
+    }
+    #
+    #if ($dataTable) { return ,$dataTable } else { return $null }
+}
+
 
 function execute-sqlselectquery2( [System.Data.SqlClient.SqlCommand]$SqlCmd, [string]$sqlText , [hashtable]$sqlparameters ) {
 
@@ -102,24 +128,23 @@ function execute-sqlselectquery2( [System.Data.SqlClient.SqlCommand]$SqlCmd, [st
 
 }
 
-
 function export ([hashtable] $t, $file ){
     if ( $t -eq $null -or $t.Count -eq 0 ){
         Write-Output "   -> no results"
         "" | Out-File $file -Encoding default
         return
     }
-
     $t[0] | ConvertTo-Csv -NoTypeInformation -Delimiter ";" |  Select-Object -First 1 | Out-File $file -Encoding default 
     $t.GetEnumerator() | ForEach-Object {
         $_.Value | ConvertTo-Csv -NoTypeInformation -Delimiter ";"   | Select-Object -Skip 1    | Out-File -Append $file -Encoding default 
     } 
+    
 }
  
 
 function fill-temporarytable([hashtable] $tableslist,[System.Data.SqlClient.SqlConnection]$SqlConnection){
     if ( $tableslist -eq $null -or $tableslist.count -eq 0 ) {
-        Write-Warning "No table to to stage"
+        Write-Warning "No table to stage"
         return 
     }
 
@@ -139,6 +164,10 @@ function fill-temporarytable([hashtable] $tableslist,[System.Data.SqlClient.SqlC
         $sqlCmd.Parameters.AddWithValue('@FULLNAME'  ,$active_table.FULLNAME )   | Out-Null
         $sqlCmd.Parameters.AddWithValue('@LABEL'     ,$active_table.CPY_LABEL )  | Out-Null
         
+        if ( $active_table.FULLNAME -like '*T_FI02_CCS*' ){
+            Write-Output "bug?"
+        }
+
         #write-host -ForegroundColor Yellow $sql  
         #write-host -ForegroundColor Yellow $sqlCmd
         try {
@@ -153,16 +182,14 @@ function fill-temporarytable([hashtable] $tableslist,[System.Data.SqlClient.SqlC
     # remove-variable $sqlCmd
 }
 
+function perform-onequery-report([System.Data.SqlClient.SqlConnection]$SqlConnection,[string]$title,[string]$sql,[hashtable]$param,[string]$path){
 
-function perform-onequery-report([System.Data.SqlClient.SqlConnection]$SqlConnection,$title,$sql,$param,$path){
-
-    $SqlCmd = New-Object System.Data.SqlClient.SqlCommand
-    $SqlCmd.Connection = $SqlConnection
     Write-Output $title 
     Write-Output "   ->$path"
     try {
-        $all_results = execute-sqlselectquery2 $SqlCmd $sql $param 
-		export $all_results $path 
+        execute-sqlselectquery1 $SqlConnection $sql $param $path 
+#        $all_results = execute-sqlselectquery2 $SqlCmd $sql $param 
+#		export $all_results $path 
     }catch {
         $Error = $_.Exception.Message
         Write-Error $Error
@@ -219,12 +246,48 @@ DELETE FROM [#MONITOR_CCS_STATUS]
 
 }
 
+
+function dump_e2sWarehouse([System.Data.SqlClient.SqlConnection]$SqlConnection) {
+    #create report table
+    $SqlCmd = New-Object System.Data.SqlClient.SqlCommand
+    $SqlCmd.Connection = $SqlConnection
+
+    $SqlCmd.CommandText = 'SET ANSI_NULLS ON'
+    $SqlCmd.ExecuteNonQuery() | out-null 
+
+    $SqlCmd.CommandText = 'SET QUOTED_IDENTIFIER ON'
+    $SqlCmd.ExecuteNonQuery() | out-null 
+    
+    $sql = read-file-query "query_e2sWarehouse_all_tables.sql"
+    $sqlTemplate = read-file-query 'query_select_start.sql'
+
+    $intermediate = execute-sqlselectquery2 $SqlCmd $sql @{}
+
+
+    $intermediate.GetEnumerator() | ForEach-Object {
+        $active_table = $_.value
+        
+        $title="Dumping table {0} " -f $active_table.express
+        
+        $sql = $sqlTemplate -f $active_table.express
+        #$sqlCmd.CommandText = $sql
+
+        $tmp = $active_table.DatabaseName+'-'+$active_table.SchemaName+'-'+$active_table.TableName
+        $path = $INI_OUTPUT_WHAREHOUSE_RAW -f $INI_OUTPUT_PATH,$tmp 
+        
+        Write-Output $title 
+        execute-sqlselectquery1 $SqlConnection $sql @{} $path
+
+    }#getEnumerator
+
+}
+
+
 function main (){
     $sqlconnection = establish-connexion
 
 	#retrieve-fiscalyear $sqlconnection
 	Write-Output "Current activated year: $INI_FISCAL_YEARS_LIST"
-
 
     #put a flag
     'go' | Out-File $INI_OUTPUT_FLAG -Force
@@ -253,7 +316,7 @@ CREATE TABLE [e2sGeneral].[Log].[#MONITOR_CCS_STATUS](
 	[CCS_DATE] [datetime] NOT NULL,
 	[CCS_STATUS] [int] NOT NULL,
 	[CCS_COMMENT] [varchar](max) NULL,
-	[CCS_FILE] [varchar](255) NULL,
+	[CCS_FILE] [nvarchar](max) NULL,
 	CONSTRAINT PK_TABLEID PRIMARY KEY (Tablename,ccs_id)		
 )
 "@
@@ -261,8 +324,11 @@ CREATE TABLE [e2sGeneral].[Log].[#MONITOR_CCS_STATUS](
 
 
     $INI_FISCAL_YEARS_LIST |ForEach-Object {
-        report_fiscal_year $_  $SqlConnection
+#        report_fiscal_year $_  $SqlConnection
     }
+
+
+<#
 
     # other file 
     $title ="query report configuration"
@@ -286,6 +352,28 @@ CREATE TABLE [e2sGeneral].[Log].[#MONITOR_CCS_STATUS](
  	$param = @{}
     $sql = read-file-query 'query_about_users.sql'
 	perform-onequery-report $SqlConnection $title $sql $param $path 
+
+
+*#>
+
+    # other file 
+    $title ="dump [e2sF2022].[0042].V_BSEG"
+    $sql = "select * from [e2sF2022].[0042].V_BSEG"
+    $path=$INI_OUTPUT_WHAREHOUSE_RAW   -f $INI_OUTPUT_PATH, "2022-0042-V_BSEG"
+ 	$param = @{}
+#	perform-onequery-report $SqlConnection $title $sql $param $path 
+
+
+   # other file 
+    $title ="dump [e2sF2022].[0042].T_FI00"
+    $sql =  "select * from [e2sF2022].[0042].T_FI00" 
+    $path=$INI_OUTPUT_WHAREHOUSE_RAW   -f $INI_OUTPUT_PATH,"2022-0042-T_FI00"
+ 	$param = @{}
+#	perform-onequery-report $SqlConnection $title $sql $param $path 
+
+
+#    dump_e2sWarehouse $SqlConnection
+
 
 
 	Write-Output "Ending script"

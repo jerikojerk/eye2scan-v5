@@ -1,0 +1,1 @@
+﻿select * from [e2sF2022].[0042].V_BSEG 
