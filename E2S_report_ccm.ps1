@@ -283,6 +283,41 @@ function dump_e2sWarehouse([System.Data.SqlClient.SqlConnection]$SqlConnection) 
 }
 
 
+#TODO support arbitrary numbers of param
+function dump_e2sMaster([System.Data.SqlClient.SqlConnection]$SqlConnection) {
+    #create report table
+    $SqlCmd = New-Object System.Data.SqlClient.SqlCommand
+    $SqlCmd.Connection = $SqlConnection
+
+    $SqlCmd.CommandText = 'SET ANSI_NULLS ON'
+    $SqlCmd.ExecuteNonQuery() | out-null 
+
+    $SqlCmd.CommandText = 'SET QUOTED_IDENTIFIER ON'
+    $SqlCmd.ExecuteNonQuery() | out-null 
+    
+    $sql = read-file-query "query_e2sMaster_some_tables.sql"
+    $sqlTemplate = read-file-query 'query_select_start.sql'
+
+    $intermediate = execute-sqlselectquery2 $SqlCmd $sql @{}
+    Write-Output "Found $($intermediate.count) items"
+
+    $intermediate.GetEnumerator() | ForEach-Object {
+        $active_table = $_.value
+        $title="Dumping table {0} " -f $active_table.express
+        
+        $sql = $sqlTemplate -f $active_table.express
+        #$sqlCmd.CommandText = $sql
+        $tmp = $active_table.DatabaseName+'-'+$active_table.SchemaName+'-'+$active_table.TableName
+        $path = $INI_OUTPUT_WHAREHOUSE_RAW -f $INI_OUTPUT_PATH,$tmp 
+        Write-Output $title 
+        execute-sqlselectquery1 $SqlConnection $sql @{} $path
+
+    }#getEnumerator
+}
+
+
+
+
 function main (){
     $sqlconnection = establish-connexion
 
