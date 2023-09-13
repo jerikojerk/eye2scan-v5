@@ -1,4 +1,4 @@
-﻿$INI_DB_config_path = 'D:\Eye2Scan\Web\connections.config'
+$INI_DB_config_path = 'D:\Eye2Scan\Web\connections.config'
 $INI_CCM_FOLDERNAME = 'Ccm'
 $INI_DB_FISCAL_PREFIX = 'e2sF'
 $INI_FISCAL_YEARS_LIST = @(2021,2022,2023)
@@ -198,6 +198,38 @@ function perform-onequery-report([System.Data.SqlClient.SqlConnection]$SqlConnec
 
 function report_fiscal_year ( $current_year,[System.Data.SqlClient.SqlConnection]$SqlConnection ){
 
+    #create report table
+    $SqlCmd = New-Object System.Data.SqlClient.SqlCommand
+    $SqlCmd.Connection = $SqlConnection
+
+    $SqlCmd.CommandText = 'SET ANSI_NULLS ON'
+    $SqlCmd.ExecuteNonQuery() | out-null 
+
+    $SqlCmd.CommandText = 'SET QUOTED_IDENTIFIER ON'
+    $SqlCmd.ExecuteNonQuery() | out-null 
+    
+    $sqlCmd.CommandText = @"
+CREATE TABLE [#MONITOR_CCS_STATUS](
+	[Schema] [varchar](10) NULL,
+	[Tablename] [varchar](96) NOT NULL,
+	[compagny] [varchar](100) NULL,
+	[CCS_ID] [int] NOT NULL,
+	[CCS_KEY] [varchar](2550) NULL,
+	[CCS_CCM_CODE] [varchar](10) NULL,
+	[CCS_CCM_NAME] [varchar](200) NULL,
+	[CCS_USR_LOGIN] [varchar](100) NULL,
+	[CCS_USR_NAME] [varchar](200) NULL,
+	[CCS_DATE] [datetime] NOT NULL,
+	[CCS_STATUS] [int] NOT NULL,
+	[CCS_COMMENT] [varchar](max) NULL,
+	[CCS_FILE] [nvarchar](max) NULL,
+	CONSTRAINT PK_TABLEID PRIMARY KEY (Tablename,ccs_id)		
+)
+"@
+
+    $SqlCmd.ExecuteNonQuery() | out-null 
+
+
     Write-Output "---- Working on $current_year -----"
 
     $SqlCmd = New-Object System.Data.SqlClient.SqlCommand
@@ -236,6 +268,8 @@ function report_fiscal_year ( $current_year,[System.Data.SqlClient.SqlConnection
 
     Write-Output "---- End of work on $current_year -----"
 
+
+
     $SqlCmd = New-Object System.Data.SqlClient.SqlCommand
     $SqlCmd.Connection = $SqlConnection
     $sqlCmd.CommandText = @"
@@ -243,11 +277,26 @@ DELETE FROM [#MONITOR_CCS_STATUS]
 "@
     $SqlCmd.ExecuteNonQuery() | out-null 
 
+    $sqlCmd.CommandText = @"
+DROP TABLE [#MONITOR_CCS_STATUS]
+"@
+    $SqlCmd.ExecuteNonQuery() | out-null 
 
 }
 
 
+
 function dump_e2sWarehouse([System.Data.SqlClient.SqlConnection]$SqlConnection) {
+    dump_e2sDatabase $SqlConnection 'query_e2sWarehouse_all_tables.sql'
+}
+
+
+function dump_e2sMaster([System.Data.SqlClient.SqlConnection]$SqlConnection) {
+    dump_e2sDatabase $SqlConnection 'query_e2sMaster_some_tables.sql'
+}
+
+#TODO support for some kind dynamic conditions on $sql_scripts
+function dump_e2sDatabase([System.Data.SqlClient.SqlConnection]$SqlConnection, $sql_script ) {
     #create report table
     $SqlCmd = New-Object System.Data.SqlClient.SqlCommand
     $SqlCmd.Connection = $SqlConnection
@@ -258,11 +307,12 @@ function dump_e2sWarehouse([System.Data.SqlClient.SqlConnection]$SqlConnection) 
     $SqlCmd.CommandText = 'SET QUOTED_IDENTIFIER ON'
     $SqlCmd.ExecuteNonQuery() | out-null 
     
-    $sql = read-file-query "query_e2sWarehouse_all_tables.sql"
+    $sql = read-file-query $sql_script
     $sqlTemplate = read-file-query 'query_select_start.sql'
 
     $intermediate = execute-sqlselectquery2 $SqlCmd $sql @{}
 
+    Write-Output "Found $($intermediate.count) items"
 
     $intermediate.GetEnumerator() | ForEach-Object {
         $active_table = $_.value
@@ -282,7 +332,6 @@ function dump_e2sWarehouse([System.Data.SqlClient.SqlConnection]$SqlConnection) 
 
 }
 
-
 function main (){
     $sqlconnection = establish-connexion
 
@@ -292,43 +341,12 @@ function main (){
     #put a flag
     'go' | Out-File $INI_OUTPUT_FLAG -Force
 
-    #create report table
-    $SqlCmd = New-Object System.Data.SqlClient.SqlCommand
-    $SqlCmd.Connection = $SqlConnection
 
-    $SqlCmd.CommandText = 'SET ANSI_NULLS ON'
-    $SqlCmd.ExecuteNonQuery() | out-null 
-
-    $SqlCmd.CommandText = 'SET QUOTED_IDENTIFIER ON'
-    $SqlCmd.ExecuteNonQuery() | out-null 
-    
-    $sqlCmd.CommandText = @"
-CREATE TABLE [e2sGeneral].[Log].[#MONITOR_CCS_STATUS](
-	[Schema] [varchar](10) NULL,
-	[Tablename] [varchar](96) NOT NULL,
-	[compagny] [varchar](100) NULL,
-	[CCS_ID] [int] NOT NULL,
-	[CCS_KEY] [varchar](2550) NULL,
-	[CCS_CCM_CODE] [varchar](10) NULL,
-	[CCS_CCM_NAME] [varchar](200) NULL,
-	[CCS_USR_LOGIN] [varchar](100) NULL,
-	[CCS_USR_NAME] [varchar](200) NULL,
-	[CCS_DATE] [datetime] NOT NULL,
-	[CCS_STATUS] [int] NOT NULL,
-	[CCS_COMMENT] [varchar](max) NULL,
-	[CCS_FILE] [nvarchar](max) NULL,
-	CONSTRAINT PK_TABLEID PRIMARY KEY (Tablename,ccs_id)		
-)
-"@
-    $SqlCmd.ExecuteNonQuery() | out-null 
-
-
+    #V5 queries 
     $INI_FISCAL_YEARS_LIST |ForEach-Object {
-#        report_fiscal_year $_  $SqlConnection
+       report_fiscal_year $_  $SqlConnection
     }
 
-
-<#
 
     # other file 
     $title ="query report configuration"
@@ -354,7 +372,6 @@ CREATE TABLE [e2sGeneral].[Log].[#MONITOR_CCS_STATUS](
 	perform-onequery-report $SqlConnection $title $sql $param $path 
 
 
-*#>
 
     # other file 
     $title ="dump [e2sF2022].[0042].V_BSEG"
@@ -372,8 +389,10 @@ CREATE TABLE [e2sGeneral].[Log].[#MONITOR_CCS_STATUS](
 #	perform-onequery-report $SqlConnection $title $sql $param $path 
 
 
-#    dump_e2sWarehouse $SqlConnection
+    #V6 queries
 
+    dump_e2sWarehouse $SqlConnection
+    dump_e2sMaster $SqlConnection
 
 
 	Write-Output "Ending script"
