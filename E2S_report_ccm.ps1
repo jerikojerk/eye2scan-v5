@@ -3,18 +3,17 @@ $INI_CCM_FOLDERNAME = 'Ccm'
 $INI_DB_FISCAL_PREFIX = 'e2sF'
 $INI_FISCAL_YEARS_LIST = @(2021,2022,2023)
 $INI_CORRECT_REPOSITORY = $false 
-$INI_OUTPUT_PATH ='D:\eye2scan\BMX_EYE2SCAN_PROD'
+$INI_OUTPUT_PATH ='D:\eye2scan\XXX_EYE2SCAN_PROD'
 $INI_OUTPUT_REPORT_ALL = '{0}\report_ccm_all_input_{1}.csv' 
 $INI_OUTPUT_REPORT_LAST = '{0}\report_ccm_last_status_{1}.csv' 
 $INI_OUTPUT_RAW_IMPORTED_TABLES = '{0}\report_imported_raw_tables_{1}.csv' 
 $INI_OUTPUT_REPORT_CONFIG = '{0}\report_import_configuration.csv' 
 $INI_OUTPUT_REPORT_USERS = '{0}\report_users_configuration.csv' 
 $INI_OUTPUT_ERROR_MESSAGES = '{0}\report_error_message.csv'  
-$INI_OUTPUT_WHAREHOUSE_RAW = '{0}\dump_e2s_{1}.csv'  
+$INI_OUTPUT_DUMP_RAW = '{0}\dump_e2s_{1}.csv'
 $INI_OUTPUT_FLAG ='{0}\refresh_on_going' -f $INI_OUTPUT_PATH
-
 $INI_SQL_QUERIES = [System.IO.Path]::GetDirectoryName($MyInvocation.MyCommand.Path)
-
+$INI_COMPRESSION_LEVEL = 'Fastest'  # Optimal
 
 function read-file-query ([string] $filename) {
     return Get-Content (join-path  $INI_SQL_QUERIES  $filename )
@@ -79,13 +78,10 @@ function execute-sqlselectquery1 ([System.Data.SqlClient.SqlConnection]$SqlConne
         $Error = $_.Exception.Message
         Write-Error $Error
         Write-Error -Verbose "Error executing SQL on database [$Database] on server [$SqlServer]. Statement: `r`n$SqlStatement"
-
     }
     finally {
        # $sqlAdapter.Dispose()
     }
-    #
-    #if ($dataTable) { return ,$dataTable } else { return $null }
 }
 
 
@@ -150,8 +146,6 @@ function fill-temporarytable([hashtable] $tableslist,[System.Data.SqlClient.SqlC
 
     $sqlTemplate = read-file-query 'query_insert_into_temptable.sql'
 
-    #Write-Output $tableslist
-
     $tableslist.GetEnumerator() | ForEach-Object {
         $active_table = $_.value 
 
@@ -164,12 +158,8 @@ function fill-temporarytable([hashtable] $tableslist,[System.Data.SqlClient.SqlC
         $sqlCmd.Parameters.AddWithValue('@FULLNAME'  ,$active_table.FULLNAME )   | Out-Null
         $sqlCmd.Parameters.AddWithValue('@LABEL'     ,$active_table.CPY_LABEL )  | Out-Null
         
-        if ( $active_table.FULLNAME -like '*T_FI02_CCS*' ){
-            Write-Output "bug?"
-        }
+#        if ( $active_table.FULLNAME -like '*T_FI02_CCS*' ){            Write-Output "bug?"        }
 
-        #write-host -ForegroundColor Yellow $sql  
-        #write-host -ForegroundColor Yellow $sqlCmd
         try {
             $r=$sqlCmd.ExecuteNonQuery()
             Write-Output "staged $($active_table.FULLNAME) with $r records over $($active_table.ROWS_COUNT) found."
@@ -183,13 +173,10 @@ function fill-temporarytable([hashtable] $tableslist,[System.Data.SqlClient.SqlC
 }
 
 function perform-onequery-report([System.Data.SqlClient.SqlConnection]$SqlConnection,[string]$title,[string]$sql,[hashtable]$param,[string]$path){
-
     Write-Output $title 
     Write-Output "   ->$path"
     try {
         execute-sqlselectquery1 $SqlConnection $sql $param $path 
-#        $all_results = execute-sqlselectquery2 $SqlCmd $sql $param 
-#		export $all_results $path 
     }catch {
         $Error = $_.Exception.Message
         Write-Error $Error
@@ -197,7 +184,6 @@ function perform-onequery-report([System.Data.SqlClient.SqlConnection]$SqlConnec
 }
 
 function report_fiscal_year ( $current_year,[System.Data.SqlClient.SqlConnection]$SqlConnection ){
-
     #create report table
     $SqlCmd = New-Object System.Data.SqlClient.SqlCommand
     $SqlCmd.Connection = $SqlConnection
@@ -228,7 +214,6 @@ CREATE TABLE [#MONITOR_CCS_STATUS](
 "@
 
     $SqlCmd.ExecuteNonQuery() | out-null 
-
 
     Write-Output "---- Working on $current_year -----"
 
@@ -287,16 +272,16 @@ DROP TABLE [#MONITOR_CCS_STATUS]
 
 
 function dump_e2sWarehouse([System.Data.SqlClient.SqlConnection]$SqlConnection) {
-    dump_e2sDatabase $SqlConnection 'query_e2sWarehouse_all_tables.sql'
+    dump_e2sDatabase $SqlConnection 'query_e2sWarehouse_all_tables.sql' 'e2sWarehouse_all_tables'
 }
 
 
 function dump_e2sMaster([System.Data.SqlClient.SqlConnection]$SqlConnection) {
-    dump_e2sDatabase $SqlConnection 'query_e2sMaster_some_tables.sql'
+    dump_e2sDatabase $SqlConnection 'query_e2sMaster_some_tables.sql' 'e2sMaster_some_tables'
 }
 
 #TODO support for some kind dynamic conditions on $sql_scripts
-function dump_e2sDatabase([System.Data.SqlClient.SqlConnection]$SqlConnection, $sql_script ) {
+function dump_e2sDatabase([System.Data.SqlClient.SqlConnection]$SqlConnection, $sql_script,[string] $zipname = '' ) {
     #create report table
     $SqlCmd = New-Object System.Data.SqlClient.SqlCommand
     $SqlCmd.Connection = $SqlConnection
@@ -314,6 +299,16 @@ function dump_e2sDatabase([System.Data.SqlClient.SqlConnection]$SqlConnection, $
 
     Write-Output "Found $($intermediate.count) items"
 
+    if ( [string]::IsNullOrEmpty($zipname) ){
+        Write-Output "Dumped item will be zipped "
+        $do_zip=$false
+    }else{
+        Write-Output "Dumped item will not be zipped "
+        $zip_fqln = $INI_OUTPUT_DUMP_RAW -f $INI_OUTPUT_PATH,$zipname
+        $zip_fqln = $zip_fqln + '.zip'
+        $do_zip=$true
+    }
+
     $intermediate.GetEnumerator() | ForEach-Object {
         $active_table = $_.value
         
@@ -323,14 +318,29 @@ function dump_e2sDatabase([System.Data.SqlClient.SqlConnection]$SqlConnection, $
         #$sqlCmd.CommandText = $sql
 
         $tmp = $active_table.DatabaseName+'-'+$active_table.SchemaName+'-'+$active_table.TableName
-        $path = $INI_OUTPUT_WHAREHOUSE_RAW -f $INI_OUTPUT_PATH,$tmp 
-        
+        $path = $INI_OUTPUT_DUMP_RAW -f $INI_OUTPUT_PATH,$tmp 
+
         Write-Output $title 
         execute-sqlselectquery1 $SqlConnection $sql @{} $path
 
+        #manage zip file immediatily
+        if ( $do_zip ) {
+            move-tozip  $path $zip_fqln 
+        }
     }#getEnumerator
-
 }
+
+function move-tozip ([string] $path ,[string] $zip_fqln ){
+    if ( Test-Path -Path $zip_fqln -PathType leaf )  {
+        Write-Output "Add $path to $zip_fqln"
+        Compress-Archive -Path $path -DestinationPath $zip_fqln -Update -CompressionLevel $INI_COMPRESSION_LEVEL
+    }else{
+        Write-Output "Create $path to $zip_fqln"
+        Compress-Archive -Path $path  -DestinationPath $zip_fqln -CompressionLevel  $INI_COMPRESSION_LEVEL
+    }
+    Remove-Item -LiteralPath $path -Recurse 
+}
+
 
 function main (){
     $sqlconnection = establish-connexion
@@ -376,7 +386,7 @@ function main (){
     # other file 
     $title ="dump [e2sF2022].[0042].V_BSEG"
     $sql = "select * from [e2sF2022].[0042].V_BSEG"
-    $path=$INI_OUTPUT_WHAREHOUSE_RAW   -f $INI_OUTPUT_PATH, "2022-0042-V_BSEG"
+    $path=$INI_OUTPUT_DUMP_RAW   -f $INI_OUTPUT_PATH, "2022-0042-V_BSEG"
  	$param = @{}
 #	perform-onequery-report $SqlConnection $title $sql $param $path 
 
@@ -384,7 +394,7 @@ function main (){
    # other file 
     $title ="dump [e2sF2022].[0042].T_FI00"
     $sql =  "select * from [e2sF2022].[0042].T_FI00" 
-    $path=$INI_OUTPUT_WHAREHOUSE_RAW   -f $INI_OUTPUT_PATH,"2022-0042-T_FI00"
+    $path=$INI_OUTPUT_DUMP_RAW   -f $INI_OUTPUT_PATH,"2022-0042-T_FI00"
  	$param = @{}
 #	perform-onequery-report $SqlConnection $title $sql $param $path 
 
