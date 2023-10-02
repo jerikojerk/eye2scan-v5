@@ -1,9 +1,22 @@
+param(
+    [Parameter(Position=0,mandatory=$true)][string][ValidateSet('explicit','all','negate')] $mode , #= 'explicit'
+    [switch] $dump_warehouse,
+    [switch] $dump_master,
+    [switch] $v5_report_configuration,
+    [switch] $v5_report_fiscal_year,
+    [switch] $v5_about_users,
+    [switch] $v5_special,
+    [switch] $archive
+ 
+)
+
+
 $INI_DB_config_path = 'D:\Eye2Scan\Web\connections.config'
 $INI_CCM_FOLDERNAME = 'Ccm'
 $INI_DB_FISCAL_PREFIX = 'e2sF'
 $INI_FISCAL_YEARS_LIST = @(2021,2022,2023)
 $INI_CORRECT_REPOSITORY = $false 
-$INI_OUTPUT_PATH ='D:\eye2scan\XXX_EYE2SCAN_PROD'
+$INI_OUTPUT_PATH ='D:\eye2scan\SHARED'
 $INI_OUTPUT_REPORT_ALL = '{0}\report_ccm_all_input_{1}.csv' 
 $INI_OUTPUT_REPORT_LAST = '{0}\report_ccm_last_status_{1}.csv' 
 $INI_OUTPUT_RAW_IMPORTED_TABLES = '{0}\report_imported_raw_tables_{1}.csv' 
@@ -15,10 +28,52 @@ $INI_OUTPUT_FLAG ='{0}\refresh_on_going' -f $INI_OUTPUT_PATH
 $INI_SQL_QUERIES = [System.IO.Path]::GetDirectoryName($MyInvocation.MyCommand.Path)
 $INI_COMPRESSION_LEVEL = 'Fastest'  # Optimal
 
+$RUNTIME_CHOICE=@{
+    'report_fiscal_year_v5'         = $v5_report_fiscal_year
+    "query report configuration"    = $v5_report_configuration
+    "retrieve error logs"           = $report_configuration
+    "About users"                   = $v5_about_users
+    "dump [e2sF2022].[0042].V_BSEG" = $v5_special
+    "dump [e2sF2022].[0042].T_FI00" = $v5_special
+    "dump [e2sF2022].[dbo]_MM03 (CDPOS)" = $v5_special
+    'dump_e2sMaster'                = $dump_master
+    'dump_e2sWarehouse'             = $dump_warehouse
+    'archive'                       =  $archive
+}
+
+
+function action-or-skip ([string] $query ){
+    if ( $mode -eq 'all' ){
+        return $true 
+    }
+    if ( $mode -eq 'negate' ) {
+        if ( $RUNTIME_CHOICE.Contains($query) ){
+            return -not($RUNTIME_CHOICE[$query])
+        }
+        else{
+            return $true
+        }
+    }
+    if ( $RUNTIME_CHOICE.Contains($query) ){
+        return $RUNTIME_CHOICE[$query]
+    }
+    else{
+        return $false 
+    }
+}
+
+function archive-or-remove( [string]$path ){
+    if ( ($RUNTIME_CHOICE['archive']) -and ( Test-Path $path ) ){
+        $tmp= get-item $path 
+        $ext=$tmp.LastWriteTime.ToString('yyyyMMddHHmmss')
+        $dst =$tmp.DirectoryName+'\'+$tmp.BaseName+'-'+$ext+$tmp.Extension
+        Move-Item -Verbose -Path $path -Destination $dst     
+    }
+}
+
 function read-file-query ([string] $filename) {
     return Get-Content (join-path  $INI_SQL_QUERIES  $filename )
 }
-
 
 function establish-connexion(){
     try{
@@ -50,16 +105,15 @@ function establish-connexion(){
     return $SqlConnection 
 }
 
-
-#https://stackoverflow.com/questions/30375519/executereader-in-powershell-script
-function execute-sqlselectquery1 ([System.Data.SqlClient.SqlConnection]$SqlConnection,[string] $SqlStatement, [hashtable]$sqlparameters, [string] $path )
-{
+function execute-sqlselectquery1 ([System.Data.SqlClient.SqlConnection]$SqlConnection,[string] $SqlStatement, [hashtable]$sqlparameters, [string] $path ){
     $ErrorActionPreference = "Stop"
     
+    archive-or-remove $path 
+
     $sqlCmd = New-Object System.Data.SqlClient.SqlCommand
     $sqlCmd.Connection = $sqlConnection
     $sqlCmd.CommandText = $SqlStatement
-    
+   
     foreach ($h in $sqlparameters.GetEnumerator()) {
         $SqlCmd.parameters.AddWithValue( "@"+$h.Name, $h.value) | out-null 
     }
@@ -71,7 +125,6 @@ function execute-sqlselectquery1 ([System.Data.SqlClient.SqlConnection]$SqlConne
     {
         $sqlAdapter.Fill($data) 
         $data.Tables[0] | ConvertTo-Csv  -NoTypeInformation | Out-File -FilePath "$path" -Encoding default
-        
     }
     catch
     {
@@ -82,11 +135,11 @@ function execute-sqlselectquery1 ([System.Data.SqlClient.SqlConnection]$SqlConne
     finally {
        # $sqlAdapter.Dispose()
     }
+    #
+    #if ($dataTable) { return ,$dataTable } else { return $null }
 }
 
-
-function execute-sqlselectquery2( [System.Data.SqlClient.SqlCommand]$SqlCmd, [string]$sqlText , [hashtable]$sqlparameters ) {
-
+function execute-sqlselectquery2( [System.Data.SqlClient.SqlCommand]$SqlCmd, [string]$sqlText , [hashtable]$sqlparameters ){
     foreach ($h in $sqlparameters.GetEnumerator()) {
         $SqlCmd.parameters.AddWithValue( "@"+$h.Name, $h.value) | out-null 
     }
@@ -125,6 +178,9 @@ function execute-sqlselectquery2( [System.Data.SqlClient.SqlCommand]$SqlCmd, [st
 }
 
 function export ([hashtable] $t, $file ){
+
+    archive-or-remove $file 
+
     if ( $t -eq $null -or $t.Count -eq 0 ){
         Write-Output "   -> no results"
         "" | Out-File $file -Encoding default
@@ -137,7 +193,6 @@ function export ([hashtable] $t, $file ){
     
 }
  
-
 function fill-temporarytable([hashtable] $tableslist,[System.Data.SqlClient.SqlConnection]$SqlConnection){
     if ( $tableslist -eq $null -or $tableslist.count -eq 0 ) {
         Write-Warning "No table to stage"
@@ -145,6 +200,8 @@ function fill-temporarytable([hashtable] $tableslist,[System.Data.SqlClient.SqlC
     }
 
     $sqlTemplate = read-file-query 'query_insert_into_temptable.sql'
+
+    #Write-Output $tableslist
 
     $tableslist.GetEnumerator() | ForEach-Object {
         $active_table = $_.value 
@@ -157,8 +214,7 @@ function fill-temporarytable([hashtable] $tableslist,[System.Data.SqlClient.SqlC
         $sqlCmd.Parameters.AddWithValue('@SCHEMANAME',$active_table.SCHEMANAME ) | Out-Null
         $sqlCmd.Parameters.AddWithValue('@FULLNAME'  ,$active_table.FULLNAME )   | Out-Null
         $sqlCmd.Parameters.AddWithValue('@LABEL'     ,$active_table.CPY_LABEL )  | Out-Null
-        
-#        if ( $active_table.FULLNAME -like '*T_FI02_CCS*' ){            Write-Output "bug?"        }
+
 
         try {
             $r=$sqlCmd.ExecuteNonQuery()
@@ -169,7 +225,6 @@ function fill-temporarytable([hashtable] $tableslist,[System.Data.SqlClient.SqlC
             write-error "issue during $($active_table.FULLNAME) setup"
         }
     } #each table
-    # remove-variable $sqlCmd
 }
 
 function perform-onequery-report([System.Data.SqlClient.SqlConnection]$SqlConnection,[string]$title,[string]$sql,[hashtable]$param,[string]$path){
@@ -177,6 +232,8 @@ function perform-onequery-report([System.Data.SqlClient.SqlConnection]$SqlConnec
     Write-Output "   ->$path"
     try {
         execute-sqlselectquery1 $SqlConnection $sql $param $path 
+#       $all_results = execute-sqlselectquery2 $SqlCmd $sql $param 
+#		export $all_results $path 
     }catch {
         $Error = $_.Exception.Message
         Write-Error $Error
@@ -184,6 +241,7 @@ function perform-onequery-report([System.Data.SqlClient.SqlConnection]$SqlConnec
 }
 
 function report_fiscal_year ( $current_year,[System.Data.SqlClient.SqlConnection]$SqlConnection ){
+
     #create report table
     $SqlCmd = New-Object System.Data.SqlClient.SqlCommand
     $SqlCmd.Connection = $SqlConnection
@@ -214,6 +272,7 @@ CREATE TABLE [#MONITOR_CCS_STATUS](
 "@
 
     $SqlCmd.ExecuteNonQuery() | out-null 
+
 
     Write-Output "---- Working on $current_year -----"
 
@@ -269,18 +328,14 @@ DROP TABLE [#MONITOR_CCS_STATUS]
 
 }
 
-
-
 function dump_e2sWarehouse([System.Data.SqlClient.SqlConnection]$SqlConnection) {
     dump_e2sDatabase $SqlConnection 'query_e2sWarehouse_all_tables.sql' 'e2sWarehouse_all_tables'
 }
-
 
 function dump_e2sMaster([System.Data.SqlClient.SqlConnection]$SqlConnection) {
     dump_e2sDatabase $SqlConnection 'query_e2sMaster_some_tables.sql' 'e2sMaster_some_tables'
 }
 
-#TODO support for some kind dynamic conditions on $sql_scripts
 function dump_e2sDatabase([System.Data.SqlClient.SqlConnection]$SqlConnection, $sql_script,[string] $zipname = '' ) {
     #create report table
     $SqlCmd = New-Object System.Data.SqlClient.SqlCommand
@@ -298,7 +353,6 @@ function dump_e2sDatabase([System.Data.SqlClient.SqlConnection]$SqlConnection, $
     $intermediate = execute-sqlselectquery2 $SqlCmd $sql @{}
 
     Write-Output "Found $($intermediate.count) items"
-
     if ( [string]::IsNullOrEmpty($zipname) ){
         Write-Output "Dumped item will be zipped "
         $do_zip=$false
@@ -307,6 +361,10 @@ function dump_e2sDatabase([System.Data.SqlClient.SqlConnection]$SqlConnection, $
         $zip_fqln = $INI_OUTPUT_DUMP_RAW -f $INI_OUTPUT_PATH,$zipname
         $zip_fqln = $zip_fqln + '.zip'
         $do_zip=$true
+        archive-or-remove $zip_fqln 
+        if ( Test-Path $zip_fqln ){
+            Remove-Item -Verbose $zip_fqln
+        }
     }
 
     $intermediate.GetEnumerator() | ForEach-Object {
@@ -341,7 +399,6 @@ function move-tozip ([string] $path ,[string] $zip_fqln ){
     Remove-Item -LiteralPath $path -Recurse 
 }
 
-
 function main (){
     $sqlconnection = establish-connexion
 
@@ -351,59 +408,79 @@ function main (){
     #put a flag
     'go' | Out-File $INI_OUTPUT_FLAG -Force
 
-
     #V5 queries 
     $INI_FISCAL_YEARS_LIST |ForEach-Object {
-       report_fiscal_year $_  $SqlConnection
+        if ( action-or-skip 'report_fiscal_year_v5' ) {
+            report_fiscal_year $_  $SqlConnection
+        }
+    }
+
+    # other file 
+    $title ="query report configuration"
+    if (action-or-skip $title){
+        $path=$INI_OUTPUT_REPORT_CONFIG  -f $INI_OUTPUT_PATH
+ 	    $param = @{} 
+        $sql = read-file-query "query_report_configuration.sql"
+  	    perform-onequery-report $SqlConnection $title $sql $param $path 
+    }
+
+    # other file 
+    $title="retrieve error logs"
+    if  (action-or-skip $title){
+        $sql = read-file-query "query_retrieve_error_logs.sql"
+	    $path = $INI_OUTPUT_ERROR_MESSAGES  -f $INI_OUTPUT_PATH
+ 	    $param = @{}
+    	perform-onequery-report $SqlConnection $title $sql $param $path 
+    }
+
+    # other file 
+    $title="About users"
+    if  (action-or-skip $title){
+	    $path = $INI_OUTPUT_REPORT_USERS -f $INI_OUTPUT_PATH
+ 	    $param = @{}
+        $sql = read-file-query 'query_about_users.sql'
+	    perform-onequery-report $SqlConnection $title $sql $param $path 
     }
 
 
     # other file 
-    $title ="query report configuration"
-    $sql = read-file-query "query_report_configuration.sql"
-    $path=$INI_OUTPUT_REPORT_CONFIG  -f $INI_OUTPUT_PATH
- 	$param = @{}
-	perform-onequery-report $SqlConnection $title $sql $param $path 
-
-
-    # other file 
-    $title="retrieve error logs"
-    $sql = read-file-query "query_retrieve_error_logs.sql"
-	$path = $INI_OUTPUT_ERROR_MESSAGES  -f $INI_OUTPUT_PATH
- 	$param = @{}
-	perform-onequery-report $SqlConnection $title $sql $param $path 
-
-
-    # other file 
-    $title="About users"
-	$path = $INI_OUTPUT_REPORT_USERS -f $INI_OUTPUT_PATH
- 	$param = @{}
-    $sql = read-file-query 'query_about_users.sql'
-	perform-onequery-report $SqlConnection $title $sql $param $path 
-
-
-
-    # other file 
     $title ="dump [e2sF2022].[0042].V_BSEG"
-    $sql = "select * from [e2sF2022].[0042].V_BSEG"
-    $path=$INI_OUTPUT_DUMP_RAW   -f $INI_OUTPUT_PATH, "2022-0042-V_BSEG"
- 	$param = @{}
-#	perform-onequery-report $SqlConnection $title $sql $param $path 
+    if  (action-or-skip $title){
+        $sql = "select * from [e2sF2022].[0042].V_BSEG"
+        $path=$INI_OUTPUT_DUMP_RAW   -f $INI_OUTPUT_PATH, "2022-0042-V_BSEG"
+ 	    $param = @{}
+    	perform-onequery-report $SqlConnection $title $sql $param $path 
+    }
 
 
    # other file 
     $title ="dump [e2sF2022].[0042].T_FI00"
-    $sql =  "select * from [e2sF2022].[0042].T_FI00" 
-    $path=$INI_OUTPUT_DUMP_RAW   -f $INI_OUTPUT_PATH,"2022-0042-T_FI00"
- 	$param = @{}
-#	perform-onequery-report $SqlConnection $title $sql $param $path 
+    if  (action-or-skip $title){
+        $sql =  "select * from [e2sF2022].[0042].T_FI00" 
+        $path=$INI_OUTPUT_DUMP_RAW   -f $INI_OUTPUT_PATH,"2022-0042-T_FI00"
+ 	    $param = @{}
+    	perform-onequery-report $SqlConnection $title $sql $param $path 
+    }
 
+
+    $title ="dump [e2sF2022].[dbo]_MM03 (CDPOS)"
+    if  (action-or-skip $title){
+        $sql =  "select * from [e2sF2022].dbo.MM03 where CDPOS_TABNAME=@value " 
+        $path=$INI_OUTPUT_DUMP_RAW   -f $INI_OUTPUT_PATH,"2022- CDPOS issue"
+ 	    $param = @{'value'='LFBK'}
+	    perform-onequery-report $SqlConnection $title $sql $param $path 
+    }
 
     #V6 queries
+    $title = 'dump_e2sWarehouse'
+    if  (action-or-skip $title){
+        dump_e2sWarehouse $SqlConnection
+    }
 
-    dump_e2sWarehouse $SqlConnection
-    dump_e2sMaster $SqlConnection
-
+    $title = 'dump_e2sMaster'
+    if  (action-or-skip $title){
+        dump_e2sMaster $SqlConnection
+    }
 
 	Write-Output "Ending script"
 
